@@ -19,6 +19,8 @@
 	var toast = document.getElementById('callToast');
 	var acceptBtn = document.getElementById('callAccept');
 	var declineBtn = document.getElementById('callDecline');
+	var acceptAudioBtn = document.getElementById('callAcceptAudio');
+	var titleEl = document.getElementById('callBannerTitle');
 
 	var ws = null;
 	var attempts = 0;
@@ -33,6 +35,9 @@
 	function showBanner(call) {
 		current = call;
 		who.textContent = call.name || 'Correspondant';  // textContent : le nom est saisi par un utilisateur
+		var isVideo = call.media === 'VIDEO';
+		if (titleEl) { titleEl.textContent = isVideo ? 'Appel vid\u00e9o entrant' : 'Appel entrant'; }
+		if (acceptAudioBtn) { acceptAudioBtn.hidden = !isVideo; }
 		banner.hidden = false;
 		if (!titleTimer) {
 			var on = false;
@@ -121,18 +126,25 @@
 
 	// ------------------------------------------------------------ actions
 
-	function openCallWindow(query) {
+	function openCallWindow(query, video) {
 		var url = ctx + '/call.jsp?' + query;
-		var win = window.open(url, 'call', 'width=420,height=640,resizable=yes');
+		var size = video ? 'width=480,height=760,resizable=yes' : 'width=420,height=640,resizable=yes';
+		var win = window.open(url, 'call', size);
 		if (!win) { window.location.href = url; }  // fenetre bloquee : on utilise l'onglet courant
 	}
 
-	acceptBtn.addEventListener('click', function () {
+	// withCam = false : l'appel est video mais le destinataire repond en audio seulement
+	function acceptCall(withCam) {
 		if (!current) { return; }
 		var c = current;
+		var video = c.media === 'VIDEO';
 		hideBanner();
-		openCallWindow('mode=incoming&callId=' + encodeURIComponent(c.callId) + '&media=AUDIO&peer=' + encodeURIComponent(c.name || ''));
-	});
+		openCallWindow('mode=incoming&callId=' + encodeURIComponent(c.callId) + '&media=' + (video ? 'VIDEO' : 'AUDIO')
+				+ '&cam=' + (withCam ? '1' : '0') + '&peer=' + encodeURIComponent(c.name || ''), video && withCam);
+	}
+
+	acceptBtn.addEventListener('click', function () { acceptCall(true); });
+	if (acceptAudioBtn) { acceptAudioBtn.addEventListener('click', function () { acceptCall(false); }); }
 
 	declineBtn.addEventListener('click', function () {
 		if (!current) { return; }
@@ -147,7 +159,9 @@
 		var parts = String(el.getAttribute('data-call-to')).split(':');
 		if (parts.length !== 2 || (parts[0] !== 'USER' && parts[0] !== 'DOCTOR') || !/^[0-9]{1,9}$/.test(parts[1])) { return; }
 		e.preventDefault();
-		openCallWindow('mode=outgoing&toRole=' + parts[0] + '&toId=' + parts[1] + '&media=AUDIO&peer=' + encodeURIComponent(el.getAttribute('data-call-name') || ''));
+		var video = el.getAttribute('data-call-media') === 'VIDEO';
+		openCallWindow('mode=outgoing&toRole=' + parts[0] + '&toId=' + parts[1] + '&media=' + (video ? 'VIDEO' : 'AUDIO')
+				+ '&cam=1&peer=' + encodeURIComponent(el.getAttribute('data-call-name') || ''), video);
 	});
 
 	connect();

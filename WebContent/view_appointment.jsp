@@ -94,6 +94,11 @@
 											data-call-media="AUDIO"
 											data-call-name="<%=com.call.Html.esc(d.getFullName())%>"
 											title="Appel vocal"><i class="fas fa-phone"></i></button>
+										<button type="button" class="btn btn-sm btn-outline-success"
+											data-call-to="DOCTOR:<%=ap.getDoctorId()%>"
+											data-call-media="VIDEO"
+											data-call-name="<%=com.call.Html.esc(d.getFullName())%>"
+											title="Appel vid&eacute;o"><i class="fas fa-video"></i></button>
 										<%
 										}
 										%>

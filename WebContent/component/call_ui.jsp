@@ -48,7 +48,7 @@
 		<div class="d-flex align-items-center mb-2">
 			<i class="fas fa-phone-volume fs-3 me-3 text-<%=callUiTheme%> call-ring"></i>
 			<div>
-				<div class="fw-bold">Appel entrant</div>
+				<div id="callBannerTitle" class="fw-bold">Appel entrant</div>
 				<div id="callBannerWho" class="text-break"></div>
 			</div>
 		</div>
@@ -60,6 +60,9 @@
 				<i class="fas fa-phone-slash"></i> Refuser
 			</button>
 		</div>
+		<button type="button" id="callAcceptAudio" class="btn btn-outline-secondary btn-sm w-100 mt-2" hidden>
+			<i class="fas fa-microphone"></i> R&eacute;pondre en audio seulement
+		</button>
 	</div>
 	<div id="callToast" role="status" hidden></div>
 </div>

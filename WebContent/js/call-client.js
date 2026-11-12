@@ -39,6 +39,11 @@
 		BUSY: 'Votre correspondant est d\u00e9j\u00e0 en communication.'
 	};
 
+	var INFO_TEXT = {
+		CAM_UNAVAILABLE: 'Cam\u00e9ra indisponible : l\u2019appel continue en audio seulement.',
+		CAM_SWITCH_FAILED: 'Impossible de changer de cam\u00e9ra.'
+	};
+
 	var RECONNECT_ATTEMPTS = 10;
 	var RECONNECT_DELAY_MS = 1000;
 	var HANGUP_CONFIRM_TIMEOUT_MS = 2500;
@@ -50,9 +55,13 @@
 	 *   mode         'outgoing' | 'incoming'
 	 *   toRole,toId  (sortant) correspondant
 	 *   callId       (entrant) appel a accepter
-	 *   media        'AUDIO'
+	 *   media        'AUDIO' | 'VIDEO' (type de l'appel)
+ *   cam          false = ne pas utiliser sa camera (reponse "audio seulement" a un appel video)
 	 *   deps         { fetch, WebSocket, RTCPeerConnection, getUserMedia, setTimeout, clearTimeout, setInterval, clearInterval }
 	 *   ui           { state(name, info), remoteStream(stream), tick(seconds) }
+ *                methodes facultatives (video) : localStream(stream, hasVideo), remoteCam(on),
+ *                cameras(count), notice(text)
+ *   deps         facultatif : enumerateDevices (changement de camera)
 	 */
 	function CallClient(opts) {
 		var self = this;
@@ -77,6 +86,12 @@
 		var reconnects = 0;
 		var hangupTimer = null;
 		var muted = false;
+		var videoCall = opts.media === 'VIDEO';          // l'appel est un appel video
+		var wantVideo = videoCall && opts.cam !== false; // on utilise sa propre camera
+		var camOn = true;
+		var dc = null;                                   // canal de donnees : etat de la camera du correspondant
+		var remoteCamOn = true;
+		var remoteHasVideo = false;
 
 		self._state = 'starting';
 
@@ -126,9 +141,11 @@
 		self.start = function () {
 			if (started) { return; }
 			started = true;
-			setState('starting', { text: 'Pr\u00e9paration du microphone\u2026' });
-			d.getUserMedia({ audio: true, video: false }).then(function (stream) {
+			setState('starting', { text: wantVideo ? 'Pr\u00e9paration de la cam\u00e9ra et du microphone\u2026' : 'Pr\u00e9paration du microphone\u2026' });
+			acquireMedia().then(function (stream) {
 				localStream = stream;
+				if (ui && ui.localStream) { ui.localStream(stream, hasLocalVideo()); }
+				refreshCameras();
 				return loadIceServers();
 			}).then(function () {
 				connect();
@@ -230,7 +247,7 @@
 				if (isCaller) {
 					if (m.callState !== 'NONE') { fail('BUSY_SELF'); return; }
 					setState('starting', { text: 'Appel\u2026' });
-					send({ type: 'call', toRole: opts.toRole, toId: opts.toId, media: 'AUDIO' });
+					send({ type: 'call', toRole: opts.toRole, toId: opts.toId, media: videoCall ? 'VIDEO' : 'AUDIO' });
 				} else {
 					if (m.callState === 'INCOMING' && m.callId === opts.callId) {
 						callId = m.callId;
@@ -271,6 +288,17 @@
 			pc = new d.RTCPeerConnection({ iceServers: iceServers });
 			var tracks = localStream.getTracks();
 			for (var i = 0; i < tracks.length; i++) { pc.addTrack(tracks[i], localStream); }
+			if (videoCall && isCaller && !hasLocalVideo()) {
+				// appelant sans camera : on demande quand meme la video du correspondant
+				try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch (e) { /* navigateur ancien */ }
+			}
+			if (videoCall) {
+				try {
+					dc = pc.createDataChannel('state', { negotiated: true, id: 1 });
+					dc.onopen = function () { sendCamState(); };
+					dc.onmessage = function (e) { onPeerState(e.data); };
+				} catch (e) { dc = null; }
+			}
 
 			pc.onicecandidate = function (e) {
 				if (e.candidate && callId) {
@@ -278,7 +306,9 @@
 				}
 			};
 			pc.ontrack = function (e) {
+				if (e.track && e.track.kind === 'video') { remoteHasVideo = true; }
 				if (ui && ui.remoteStream && e.streams && e.streams[0]) { ui.remoteStream(e.streams[0]); }
+				publishRemoteCam();
 			};
 			pc.onconnectionstatechange = function () {
 				if (!pc) { return; }
@@ -328,6 +358,7 @@
 			remoteSet = false;
 			pc.setRemoteDescription({ type: 'offer', sdp: m.sdp }).then(function () {
 				remoteSet = true;
+				if (videoCall && opts.cam === false) { disableRemoteVideo(); }  // reponse "audio seulement"
 				return drainCandidates();
 			}).then(function () {
 				return pc.createAnswer();
@@ -372,10 +403,122 @@
 		self.toggleMute = function () {
 			muted = !muted;
 			if (localStream) {
-				var tracks = localStream.getTracks();
+				var tracks = localStream.getAudioTracks();
 				for (var i = 0; i < tracks.length; i++) { tracks[i].enabled = !muted; }
 			}
 			return muted;
+		};
+
+		// ------------------------------------------------------------ video
+
+		function hasLocalVideo() { return !!localStream && localStream.getVideoTracks().length > 0; }
+
+		/** Micro (obligatoire) et camera (si l'appel est video). Camera refusee ou absente : on continue en audio. */
+		function acquireMedia() {
+			if (!wantVideo) { return d.getUserMedia({ audio: true, video: false }); }
+			return d.getUserMedia({ audio: true, video: true }).then(null, function () {
+				return d.getUserMedia({ audio: true, video: false }).then(function (s) {
+					wantVideo = false;
+					if (ui && ui.notice) { ui.notice(INFO_TEXT.CAM_UNAVAILABLE); }
+					return s;
+				});
+			});
+		}
+
+		function refreshCameras() {
+			if (!d.enumerateDevices || !ui || !ui.cameras) { return; }
+			d.enumerateDevices().then(function (list) {
+				var n = 0;
+				for (var i = 0; i < list.length; i++) { if (list[i].kind === 'videoinput') { n++; } }
+				ui.cameras(n);
+			}, function () { /* ignore */ });
+		}
+
+		/** Dit au correspondant si notre camera est allumee (canal de donnees entre navigateurs, sans passer par le serveur). */
+		function sendCamState() {
+			if (dc && dc.readyState === 'open') {
+				try { dc.send(JSON.stringify({ cam: hasLocalVideo() && camOn })); } catch (e) { /* ignore */ }
+			}
+		}
+
+		function onPeerState(text) {
+			if (typeof text !== 'string' || text.length > 200) { return; }
+			var m;
+			try { m = JSON.parse(text); } catch (e) { return; }
+			if (m && typeof m.cam === 'boolean') { remoteCamOn = m.cam; publishRemoteCam(); }
+		}
+
+		function publishRemoteCam() {
+			if (ui && ui.remoteCam) { ui.remoteCam(remoteHasVideo && remoteCamOn); }
+		}
+
+		/** Reponse "audio seulement" : on n'envoie ni ne recoit de video. */
+		function disableRemoteVideo() {
+			if (!pc || !pc.getTransceivers) { return; }
+			var list = pc.getTransceivers();
+			for (var i = 0; i < list.length; i++) {
+				var tr = list[i];
+				if (tr.receiver && tr.receiver.track && tr.receiver.track.kind === 'video') {
+					try { tr.direction = 'inactive'; } catch (e) { /* ignore */ }
+				}
+			}
+		}
+
+		/** Allume ou coupe sa camera. Renvoie true si la camera est allumee apres l'appel. */
+		self.toggleCamera = function () {
+			if (!hasLocalVideo()) { return false; }
+			camOn = !camOn;
+			var tracks = localStream.getVideoTracks();
+			for (var i = 0; i < tracks.length; i++) { tracks[i].enabled = camOn; }
+			sendCamState();
+			return camOn;
+		};
+
+		self.hasCamera = function () { return hasLocalVideo(); };
+
+		/** Passe a la camera suivante (avant / arriere, par exemple). Renvoie une promesse (true si changee). */
+		self.switchCamera = function () {
+			if (!hasLocalVideo() || !d.enumerateDevices) { return Promise.resolve(false); }
+			var oldTrack = localStream.getVideoTracks()[0];
+			var curId = (oldTrack.getSettings && oldTrack.getSettings().deviceId) || null;
+
+			function openCam(deviceId) {
+				return d.getUserMedia({ audio: false, video: deviceId ? { deviceId: { exact: deviceId } } : true }).then(function (s) {
+					var nt = s.getVideoTracks()[0];
+					nt.enabled = camOn;
+					var sender = null;
+					if (pc) {
+						var senders = pc.getSenders();
+						for (var k = 0; k < senders.length; k++) {
+							if (senders[k].track === oldTrack) { sender = senders[k]; }
+						}
+					}
+					return (sender ? sender.replaceTrack(nt) : Promise.resolve()).then(function () {
+						localStream.removeTrack(oldTrack);
+						localStream.addTrack(nt);
+						oldTrack = nt;
+						if (ui && ui.localStream) { ui.localStream(localStream, true); }
+					});
+				});
+			}
+
+			return d.enumerateDevices().then(function (list) {
+				var cams = [];
+				for (var i = 0; i < list.length; i++) {
+					if (list[i].kind === 'videoinput' && list[i].deviceId) { cams.push(list[i]); }
+				}
+				if (cams.length < 2) { return false; }
+				var idx = 0;
+				for (var j = 0; j < cams.length; j++) { if (cams[j].deviceId === curId) { idx = j; } }
+				var next = cams[(idx + 1) % cams.length];
+				oldTrack.stop();  // certains telephones ne peuvent pas ouvrir deux cameras a la fois
+				return openCam(next.deviceId).then(function () { return true; }, function () {
+					return openCam(curId).then(function () { return false; });
+				});
+			}).then(null, function () {
+				if (ui && ui.notice) { ui.notice(INFO_TEXT.CAM_SWITCH_FAILED); }
+				return false;
+			});
 		};
 
 		self.hangup = function () {
@@ -405,5 +548,6 @@
 
 	CallClient.ENDED_TEXT = ENDED_TEXT;
 	CallClient.ERROR_TEXT = ERROR_TEXT;
+	CallClient.INFO_TEXT = INFO_TEXT;
 	return CallClient;
 });
