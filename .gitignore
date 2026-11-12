@@ -1,0 +1,21 @@
+﻿# Fichiers de compilation
+/build/
+/bin/
+*.class
+
+# Fichiers temporaires
+*.log
+*.tmp
+*.bak
+
+# Configuration locale Eclipse
+.metadata/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Secrets et identifiants locaux
+.env
+.env.*
+!.env.example
